@@ -39,7 +39,7 @@ data/**/*.txt
 !data/transcripts/.gitkeep
 !data/audio/.gitkeep
 data/browser_logs/**/*.log
-data/browser_logs/**/*.txt
+data/debug/**
 
 # IDE
 .vscode/
