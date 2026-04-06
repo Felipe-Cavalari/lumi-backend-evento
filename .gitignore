@@ -30,15 +30,9 @@ wheels/
 .env.*.local
 
 # Data files (mantém estrutura de pastas, ignora apenas arquivos)
-data/**/*.csv
-data/**/*.pcm
-data/**/*.mp3
-data/**/*.wav
-data/**/*.txt
-!data/.gitkeep
-!data/transcripts/.gitkeep
-!data/audio/.gitkeep
-data/browser_logs/**/*.log
+data/audio/**
+data/transcripts/**
+data/browser_logs/**
 data/debug/**
 
 # IDE
