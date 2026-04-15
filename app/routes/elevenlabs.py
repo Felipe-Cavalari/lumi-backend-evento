@@ -2,7 +2,10 @@
 from fastapi import APIRouter, HTTPException, Header
 from typing import Optional
 import httpx
+import logging
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["elevenlabs"])
 
@@ -62,7 +65,6 @@ async def get_signed_url(
     
     try:
         async with httpx.AsyncClient() as client:
-            agent_id = settings.agent_id_value
             response = await client.get(
                 f"https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={agent_id}",
                 headers={
@@ -70,15 +72,27 @@ async def get_signed_url(
                 },
                 timeout=10.0,
             )
+            logger.info("ElevenLabs /signed-url status=%d body=%s", response.status_code, response.text[:500])
             response.raise_for_status()
             data = response.json()
-            return {"signed_url": data.get("signed_url")}
+            signed_url = data.get("signed_url")
+            if not signed_url:
+                logger.error("ElevenLabs retornou signed_url nulo. Resposta completa: %s", data)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"ElevenLabs retornou signed_url nulo. Resposta: {data}"
+                )
+            return {"signed_url": signed_url}
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as e:
+        logger.error("ElevenLabs /signed-url HTTP error status=%d body=%s", e.response.status_code, e.response.text)
         raise HTTPException(
             status_code=e.response.status_code,
             detail=f"Erro ao obter signed URL: {e.response.text}"
         )
     except httpx.RequestError as e:
+        logger.error("ElevenLabs /signed-url request error: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Erro de conexão: {str(e)}")
 
 
@@ -107,13 +121,25 @@ async def get_conversation_token(
                 },
                 timeout=10.0,
             )
+            logger.info("ElevenLabs /conversation/token status=%d body=%s", response.status_code, response.text[:500])
             response.raise_for_status()
             data = response.json()
-            return {"conversation_token": data.get("conversation_token") or data.get("token")}
+            token = data.get("conversation_token") or data.get("token")
+            if not token:
+                logger.error("ElevenLabs retornou token nulo. Resposta completa: %s", data)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"ElevenLabs retornou token nulo. Resposta: {data}"
+                )
+            return {"conversation_token": token}
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as e:
+        logger.error("ElevenLabs /conversation/token HTTP error status=%d body=%s", e.response.status_code, e.response.text)
         raise HTTPException(
             status_code=e.response.status_code,
             detail=f"Erro ao obter conversation token: {e.response.text}"
         )
     except httpx.RequestError as e:
+        logger.error("ElevenLabs /conversation/token request error: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Erro de conexão: {str(e)}")
