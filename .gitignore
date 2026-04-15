@@ -45,3 +45,7 @@ data/debug/**
 # OS
 .DS_Store
 Thumbs.db
+
+# Agents skills
+.claude
+.agents

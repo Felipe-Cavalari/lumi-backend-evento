@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+
+# Ambiente local
+.env
+.env.*
+venv/
+.venv/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Dados locais
+data/
+
+# Ferramentas de desenvolvimento
+.agents/
+.claude/
+skills-lock.json
+runtime.txt
+PROJECT.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
