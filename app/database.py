@@ -31,6 +31,7 @@ async def get_pool() -> asyncpg.Pool:
                         max_size=5,
                         command_timeout=60,
                         timeout=CONNECTION_TIMEOUT,
+                        statement_cache_size=0,
                     ),
                     timeout=CONNECTION_TIMEOUT + 5,
                 )
