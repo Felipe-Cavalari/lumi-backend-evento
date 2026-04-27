@@ -1,11 +1,11 @@
-"""Rotas para gerenciamento de leads (PostgreSQL/Supabase)."""
+"""Rotas para gerenciamento de leads (Supabase)."""
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.config import settings
-from app.database import get_pool
+from app.database import get_client
 from app.security import require_admin_key
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])
@@ -19,47 +19,33 @@ class LeadCreate(BaseModel):
 
 @router.post("/register")
 async def register_lead(lead: LeadCreate):
-    """Registra um novo lead no PostgreSQL (Supabase). Só retorna sucesso após confirmar que foi salvo."""
-    if not settings.database_url:
-        raise HTTPException(
-            status_code=503,
-            detail="DATABASE_URL não configurado. Adicione em backend/.env para persistir leads.",
-        )
+    if not settings.supabase_url:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL não configurado.")
     try:
-        pool = await get_pool()
-        lead_id = uuid.uuid4()
-        async with pool.acquire() as conn:
-            existing_lead = await conn.fetchrow(
-                "SELECT id FROM leads WHERE contato = $1",
-                lead.contato,
-            )
+        db = get_client()
 
-            if existing_lead:
-                return {
-                    "success": True,
-                    "message": "Lead já registrado (contato já existe)",
-                    "lead_id": str(existing_lead["id"]),
-                }
+        existing = db.table("leads").select("id").eq("contato", lead.contato).execute()
+        if existing.data:
+            return {
+                "success": True,
+                "message": "Lead já registrado (contato já existe)",
+                "lead_id": existing.data[0]["id"],
+            }
 
-            await conn.execute(
-                "INSERT INTO leads (id, nome, contato, empresa) VALUES ($1, $2, $3, $4)",
-                lead_id,
-                lead.nome,
-                lead.contato,
-                lead.empresa,
-            )
-            row = await conn.fetchrow(
-                "SELECT id FROM leads WHERE id = $1", lead_id
-            )
-        if not row:
-            raise HTTPException(
-                status_code=500,
-                detail="Lead não foi persistido no banco. Tente novamente.",
-            )
+        result = db.table("leads").insert({
+            "id": str(uuid.uuid4()),
+            "nome": lead.nome,
+            "contato": lead.contato,
+            "empresa": lead.empresa,
+        }).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Lead não foi persistido no banco.")
+
         return {
             "success": True,
             "message": "Lead registrado com sucesso",
-            "lead_id": str(lead_id),
+            "lead_id": result.data[0]["id"],
         }
     except HTTPException:
         raise
@@ -69,29 +55,25 @@ async def register_lead(lead: LeadCreate):
 
 @router.get("/list", dependencies=[Depends(require_admin_key)])
 async def list_leads():
-    """Lista todos os leads do PostgreSQL."""
-    if not settings.database_url:
-        raise HTTPException(
-            status_code=503,
-            detail="DATABASE_URL não configurado.",
-        )
+    if not settings.supabase_url:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL não configurado.")
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT id, created_at, nome, contato, empresa, COALESCE(contato_feito, false) as contato_feito, elevenlabs_conversation_id FROM leads ORDER BY created_at DESC"
-            )
+        db = get_client()
+        result = db.table("leads").select(
+            "id, created_at, nome, contato, empresa, contato_feito, elevenlabs_conversation_id"
+        ).order("created_at", desc=True).execute()
+
         leads = [
             {
-                "id": str(r["id"]),
-                "timestamp": r["created_at"].isoformat() if r["created_at"] else "",
+                "id": r["id"],
+                "timestamp": r.get("created_at") or "",
                 "nome": r["nome"],
                 "contato": r["contato"],
-                "empresa": r["empresa"],
-                "contato_feito": bool(r["contato_feito"]),
-                "elevenlabs_conversation_id": r["elevenlabs_conversation_id"],
+                "empresa": r.get("empresa"),
+                "contato_feito": bool(r.get("contato_feito", False)),
+                "elevenlabs_conversation_id": r.get("elevenlabs_conversation_id"),
             }
-            for r in rows
+            for r in result.data
         ]
         return {"leads": leads}
     except Exception as e:
@@ -108,22 +90,16 @@ class EmpresaUpdate(BaseModel):
 
 @router.patch("/{lead_id}/empresa", dependencies=[Depends(require_admin_key)])
 async def update_empresa(lead_id: str, body: EmpresaUpdate):
-    """Atualiza a empresa de um lead."""
-    if not settings.database_url:
-        raise HTTPException(status_code=503, detail="DATABASE_URL não configurado.")
+    if not settings.supabase_url:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL não configurado.")
     try:
-        uid = uuid.UUID(lead_id)
+        uuid.UUID(lead_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="ID de lead inválido.")
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            result = await conn.execute(
-                "UPDATE leads SET empresa = $1 WHERE id = $2",
-                body.empresa,
-                uid,
-            )
-        if result == "UPDATE 0":
+        db = get_client()
+        result = db.table("leads").update({"empresa": body.empresa}).eq("id", lead_id).execute()
+        if not result.data:
             raise HTTPException(status_code=404, detail="Lead não encontrado.")
         return {"success": True, "empresa": body.empresa}
     except HTTPException:
@@ -134,28 +110,18 @@ async def update_empresa(lead_id: str, body: EmpresaUpdate):
 
 @router.patch("/{lead_id}/contato-feito", dependencies=[Depends(require_admin_key)])
 async def update_contato_feito(lead_id: str, body: ContatoFeitoUpdate):
-    """Atualiza o flag contato_feito de um lead."""
-    if not settings.database_url:
-        raise HTTPException(
-            status_code=503,
-            detail="DATABASE_URL não configurado.",
-        )
+    if not settings.supabase_url:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL não configurado.")
     try:
-        uid = uuid.UUID(lead_id)
+        uuid.UUID(lead_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="ID de lead inválido.")
     try:
-        pool = await get_pool()
-        contato_feito = body.contato_feito
-        async with pool.acquire() as conn:
-            result = await conn.execute(
-                "UPDATE leads SET contato_feito = $1 WHERE id = $2",
-                contato_feito,
-                uid,
-            )
-        if result == "UPDATE 0":
+        db = get_client()
+        result = db.table("leads").update({"contato_feito": body.contato_feito}).eq("id", lead_id).execute()
+        if not result.data:
             raise HTTPException(status_code=404, detail="Lead não encontrado.")
-        return {"success": True, "contato_feito": contato_feito}
+        return {"success": True, "contato_feito": body.contato_feito}
     except HTTPException:
         raise
     except Exception as e:

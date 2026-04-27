@@ -15,12 +15,6 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
-    if settings.database_url:
-        try:
-            from app.database import close_pool
-            await close_pool()
-        except Exception:
-            pass
 
 
 app = FastAPI(
@@ -64,17 +58,15 @@ async def health():
 @app.get("/api/health")
 async def api_health():
     """Health check incluindo conexão com banco de dados."""
-    if not settings.database_url:
+    if not settings.supabase_url:
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "database": "disconnected", "detail": "DATABASE_URL não configurado"},
+            content={"status": "unhealthy", "database": "disconnected", "detail": "SUPABASE_URL não configurado"},
         )
     try:
-        from app.database import get_pool
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
+        from app.database import get_client
+        get_client().table("leads").select("id").limit(1).execute()
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
         from fastapi.responses import JSONResponse

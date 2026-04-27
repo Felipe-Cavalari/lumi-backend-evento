@@ -6,4 +6,4 @@ pydantic>=2.0.0
 pydantic-settings>=2.0.0
 pydub>=0.25.1
 audioop-lts>=0.2.0; python_version >= "3.13"
-asyncpg>=0.29.0
+supabase>=2.0.0
