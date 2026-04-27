@@ -57,13 +57,11 @@ async def _init_leads_table() -> None:
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 nome TEXT NOT NULL,
-                email TEXT NOT NULL,
-                telefone TEXT NOT NULL,
-                empresa TEXT NOT NULL
+                contato TEXT UNIQUE,
+                empresa TEXT,
+                contato_feito BOOLEAN NOT NULL DEFAULT FALSE,
+                elevenlabs_conversation_id TEXT
             )
-        """)
-        await conn.execute("""
-            ALTER TABLE leads ADD COLUMN IF NOT EXISTS contato_feito BOOLEAN NOT NULL DEFAULT FALSE
         """)
 
 

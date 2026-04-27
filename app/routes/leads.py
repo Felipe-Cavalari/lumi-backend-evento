@@ -1,5 +1,6 @@
 """Rotas para gerenciamento de leads (PostgreSQL/Supabase)."""
 import uuid
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -12,9 +13,8 @@ router = APIRouter(prefix="/api/leads", tags=["leads"])
 
 class LeadCreate(BaseModel):
     nome: str
-    email: str
-    telefone: str
-    empresa: str
+    contato: str
+    empresa: Optional[str] = None
 
 
 @router.post("/register")
@@ -30,27 +30,22 @@ async def register_lead(lead: LeadCreate):
         lead_id = uuid.uuid4()
         async with pool.acquire() as conn:
             existing_lead = await conn.fetchrow(
-                "SELECT id FROM leads WHERE email = $1 OR telefone = $2",
-                lead.email,
-                lead.telefone
+                "SELECT id FROM leads WHERE contato = $1",
+                lead.contato,
             )
-            
+
             if existing_lead:
                 return {
                     "success": True,
-                    "message": "Lead já registrado (email ou telefone já existem)",
+                    "message": "Lead já registrado (contato já existe)",
                     "lead_id": str(existing_lead["id"]),
                 }
 
             await conn.execute(
-                """
-                INSERT INTO leads (id, nome, email, telefone, empresa)
-                VALUES ($1, $2, $3, $4, $5)
-                """,
+                "INSERT INTO leads (id, nome, contato, empresa) VALUES ($1, $2, $3, $4)",
                 lead_id,
                 lead.nome,
-                lead.email,
-                lead.telefone,
+                lead.contato,
                 lead.empresa,
             )
             row = await conn.fetchrow(
@@ -84,17 +79,17 @@ async def list_leads():
         pool = await get_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT id, created_at, nome, email, telefone, empresa, COALESCE(contato_feito, false) as contato_feito FROM leads ORDER BY created_at DESC"
+                "SELECT id, created_at, nome, contato, empresa, COALESCE(contato_feito, false) as contato_feito, elevenlabs_conversation_id FROM leads ORDER BY created_at DESC"
             )
         leads = [
             {
                 "id": str(r["id"]),
                 "timestamp": r["created_at"].isoformat() if r["created_at"] else "",
                 "nome": r["nome"],
-                "email": r["email"],
-                "telefone": r["telefone"],
+                "contato": r["contato"],
                 "empresa": r["empresa"],
                 "contato_feito": bool(r["contato_feito"]),
+                "elevenlabs_conversation_id": r["elevenlabs_conversation_id"],
             }
             for r in rows
         ]
@@ -105,6 +100,36 @@ async def list_leads():
 
 class ContatoFeitoUpdate(BaseModel):
     contato_feito: bool
+
+
+class EmpresaUpdate(BaseModel):
+    empresa: str
+
+
+@router.patch("/{lead_id}/empresa", dependencies=[Depends(require_admin_key)])
+async def update_empresa(lead_id: str, body: EmpresaUpdate):
+    """Atualiza a empresa de um lead."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="DATABASE_URL não configurado.")
+    try:
+        uid = uuid.UUID(lead_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ID de lead inválido.")
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE leads SET empresa = $1 WHERE id = $2",
+                body.empresa,
+                uid,
+            )
+        if result == "UPDATE 0":
+            raise HTTPException(status_code=404, detail="Lead não encontrado.")
+        return {"success": True, "empresa": body.empresa}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao atualizar lead: {str(e)}")
 
 
 @router.patch("/{lead_id}/contato-feito", dependencies=[Depends(require_admin_key)])
