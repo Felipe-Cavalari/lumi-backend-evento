@@ -1,8 +1,9 @@
 """Rotas para gerenciamento de leads (Supabase)."""
+import re
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.config import settings
 from app.database import get_client
@@ -15,6 +16,13 @@ class LeadCreate(BaseModel):
     nome: str
     contato: str
     empresa: Optional[str] = None
+    contato_feito: Optional[bool] = None
+    elevenlabs_conversation_id: Optional[str] = None
+
+    @field_validator("contato")
+    @classmethod
+    def strip_leading_plus(cls, v: str) -> str:
+        return re.sub(r"^\+", "", v)
 
 
 @router.post("/register")
@@ -32,12 +40,18 @@ async def register_lead(lead: LeadCreate):
                 "lead_id": existing.data[0]["id"],
             }
 
-        result = db.table("leads").insert({
+        payload = {
             "id": str(uuid.uuid4()),
             "nome": lead.nome,
             "contato": lead.contato,
             "empresa": lead.empresa,
-        }).execute()
+        }
+        if lead.contato_feito is not None:
+            payload["contato_feito"] = lead.contato_feito
+        if lead.elevenlabs_conversation_id is not None:
+            payload["elevenlabs_conversation_id"] = lead.elevenlabs_conversation_id
+
+        result = db.table("leads").insert(payload).execute()
 
         if not result.data:
             raise HTTPException(status_code=500, detail="Lead não foi persistido no banco.")
@@ -78,6 +92,35 @@ async def list_leads():
         return {"leads": leads}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao listar leads: {str(e)}")
+
+
+@router.get("/by-contato", dependencies=[Depends(require_admin_key)])
+async def get_lead_by_contato(contato: str):
+    if not settings.supabase_url:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL não configurado.")
+    try:
+        db = get_client()
+        result = db.table("leads").select(
+            "id, created_at, nome, contato, empresa, contato_feito, elevenlabs_conversation_id"
+        ).eq("contato", contato).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Lead não encontrado.")
+
+        r = result.data[0]
+        return {
+            "id": r["id"],
+            "timestamp": r.get("created_at") or "",
+            "nome": r["nome"],
+            "contato": r["contato"],
+            "empresa": r.get("empresa"),
+            "contato_feito": bool(r.get("contato_feito", False)),
+            "elevenlabs_conversation_id": r.get("elevenlabs_conversation_id"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar lead: {str(e)}")
 
 
 class ContatoFeitoUpdate(BaseModel):
