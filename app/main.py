@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import debug_logs, elevenlabs, leads, transcripts
+from app.routes import debug_logs, elevenlabs, leads, transcripts, usage_twilio, usage_elevenlabs
 from app.config import settings
 
 logging.basicConfig(
@@ -41,6 +41,8 @@ app.include_router(elevenlabs.router)
 app.include_router(leads.router)
 app.include_router(transcripts.router)
 app.include_router(debug_logs.router)
+app.include_router(usage_twilio.router)
+app.include_router(usage_elevenlabs.router)
 
 
 @app.get("/")

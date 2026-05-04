@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     elevenlabs_agent_id: Optional[str] = Field(None, alias="ELEVENLABS_AGENT_ID")
     cors_origins: Optional[str] = Field(default="http://localhost:3000", alias="CORS_ORIGINS")
     admin_api_key: Optional[str] = Field(None, alias="ADMIN_API_KEY")
+    twilio_account_sid: Optional[str] = Field(None, alias="TWILIO_ACCOUNT_SID")
+    twilio_auth_token: Optional[str] = Field(None, alias="TWILIO_AUTH_TOKEN")
     
     @property
     def agent_id_value(self) -> str:
