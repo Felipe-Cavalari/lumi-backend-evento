@@ -1,5 +1,5 @@
 """Rotas para salvar transcrições STT e áudios TTS."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, field_validator
 from typing import ClassVar, Optional
 import os
@@ -11,9 +11,19 @@ from datetime import datetime
 from pathlib import Path
 from pydub import AudioSegment
 
+from app.rate_limit import limiter
 from app.security import require_admin_key
 
 router = APIRouter(prefix="/api/transcripts", tags=["transcripts"])
+
+
+def _validate_speaker(v: str) -> str:
+    """Fix C-01: speaker entra no nome do arquivo, então só pode ser
+    'user' ou 'agent' — elimina o vetor de path traversal."""
+    normalized = (v or "").strip().lower()
+    if normalized not in {"user", "agent"}:
+        raise ValueError("speaker deve ser 'user' ou 'agent'")
+    return normalized
 
 
 class TranscriptData(BaseModel):
@@ -21,6 +31,8 @@ class TranscriptData(BaseModel):
     speaker: str  # "user" ou "agent"
     text: str
     timestamp: Optional[str] = None
+
+    _validate_speaker = field_validator("speaker")(staticmethod(_validate_speaker))
 
 
 class AudioData(BaseModel):
@@ -35,6 +47,8 @@ class AudioData(BaseModel):
     # Fix V-03: limite de 20 MB no payload base64 (~15 MB de áudio bruto)
     # ClassVar é necessário para que o Pydantic v2 não trate como ModelPrivateAttr
     MAX_BASE64_BYTES: ClassVar[int] = 20 * 1024 * 1024  # 20 MB
+
+    _validate_speaker = field_validator("speaker")(staticmethod(_validate_speaker))
 
     @field_validator("audio_base64")
     @classmethod
@@ -56,6 +70,17 @@ AUDIO_DIR = DATA_DIR / "audio"
 DATA_DIR.mkdir(exist_ok=True)
 TRANSCRIPTS_DIR.mkdir(exist_ok=True)
 AUDIO_DIR.mkdir(exist_ok=True)
+
+
+def _ensure_within(base: Path, target: Path) -> Path:
+    """Fix C-01: garante que ``target`` está contido em ``base`` (anti path
+    traversal). Defesa em profundidade — o nome final do arquivo nunca pode
+    escapar do diretório de dados, independentemente do input."""
+    base_r = base.resolve()
+    target_r = target.resolve()
+    if base_r != target_r and base_r not in target_r.parents:
+        raise HTTPException(status_code=400, detail="Caminho de arquivo inválido.")
+    return target_r
 
 
 def get_lead_dir(lead_email: str) -> Path:
@@ -97,7 +122,8 @@ def get_audio_dir(lead_email: str, speaker: str = "user") -> Path:
 
 
 @router.post("/stt")
-async def save_stt_transcript(transcript: TranscriptData):
+@limiter.limit("300/minute")
+async def save_stt_transcript(request: Request, transcript: TranscriptData):
     """
     Salva uma transcrição STT em arquivo de texto.
     
@@ -115,8 +141,8 @@ async def save_stt_transcript(transcript: TranscriptData):
         # Remover caracteres inválidos restantes
         safe_timestamp = "".join(c for c in safe_timestamp if c.isalnum() or c in ["-", "_"])
         filename = f"{safe_timestamp}_{transcript.speaker}.txt"
-        filepath = lead_dir / filename
-        
+        filepath = _ensure_within(TRANSCRIPTS_DIR, lead_dir / filename)
+
         print(f"[STT] Salvando em: {filepath}")
         
         # Salvar transcrição
@@ -126,12 +152,14 @@ async def save_stt_transcript(transcript: TranscriptData):
             f.write(f"Text: {transcript.text}\n")
         
         print(f"[STT] Arquivo salvo com sucesso: {filepath}")
-        
+
         return {
             "success": True,
             "message": "Transcrição salva com sucesso",
             "filepath": str(filepath),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -140,7 +168,8 @@ async def save_stt_transcript(transcript: TranscriptData):
 
 
 @router.post("/tts")
-async def save_tts_audio(audio: AudioData):
+@limiter.limit("300/minute")
+async def save_tts_audio(request: Request, audio: AudioData):
     """
     Salva um áudio TTS ou STT (usuário) em arquivo MP3.
     
@@ -175,7 +204,7 @@ async def save_tts_audio(audio: AudioData):
         incoming_format = (audio.audio_format or "").lower().strip()
         if incoming_format in passthrough_formats:
             filename = f"{safe_timestamp}_{audio.speaker}_{event_id}.{incoming_format}"
-            filepath = audio_dir / filename
+            filepath = _ensure_within(AUDIO_DIR, audio_dir / filename)
             with open(filepath, "wb") as f:
                 f.write(audio_bytes)
             print(f"[TTS] Áudio {incoming_format.upper()} salvo (passthrough): {filepath}")
@@ -232,7 +261,7 @@ async def save_tts_audio(audio: AudioData):
         
         # Nome do arquivo: timestamp_speaker_eventId.{format}
         filename = f"{safe_timestamp}_{audio.speaker}_{event_id}.{audio_format}"
-        filepath = audio_dir / filename
+        filepath = _ensure_within(AUDIO_DIR, audio_dir / filename)
         
         print(f"[TTS] Salvando áudio {audio_format.upper()} em: {filepath}, tamanho: {len(mp3_bytes)} bytes")
         

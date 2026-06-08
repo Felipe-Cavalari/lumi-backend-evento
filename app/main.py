@@ -3,8 +3,12 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from app.routes import debug_logs, elevenlabs, leads, transcripts, usage_twilio, usage_elevenlabs
 from app.config import settings
+from app.database import init_pool, close_pool
+from app.rate_limit import limiter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,7 +18,9 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await init_pool()
     yield
+    await close_pool()
 
 
 app = FastAPI(
@@ -23,6 +29,10 @@ app = FastAPI(
     description="Backend para gerenciamento de tokens e signed URLs da ElevenLabs",
     version="1.0.0",
 )
+
+# Rate limiting (slowapi) — limites aplicados por rota via @limiter.limit.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Configurar CORS — usa a lista CORS_ORIGINS do .env (padrão: http://localhost:3000)
 cors_origins = settings.cors_origins_list
@@ -60,19 +70,21 @@ async def health():
 @app.get("/api/health")
 async def api_health():
     """Health check incluindo conexão com banco de dados."""
-    if not settings.supabase_url:
-        from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse
+
+    if not settings.database_url:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "database": "disconnected", "detail": "SUPABASE_URL não configurado"},
+            content={"status": "unhealthy", "database": "disconnected", "detail": "DATABASE_URL não configurado"},
         )
     try:
-        from app.database import get_client
-        get_client().table("leads").select("id").limit(1).execute()
+        from app.database import get_pool
+        await get_pool().fetchval("select 1")
         return {"status": "healthy", "database": "connected"}
-    except Exception as e:
-        from fastapi.responses import JSONResponse
+    except Exception:
+        # Não expõe detalhes internos do erro ao cliente (M-01).
+        logging.exception("Health check do banco falhou")
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "database": "disconnected", "detail": str(e)},
+            content={"status": "unhealthy", "database": "disconnected"},
         )

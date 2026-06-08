@@ -1,0 +1,268 @@
+{
+  "info": {
+    "name": "Lumi - Leads API",
+    "description": "Collection da API de leads (FastAPI / PostgreSQL). Configure as variáveis `baseUrl` e `adminKey` na aba Variables ou no Environment.\n\nRotas administrativas exigem o header `X-Admin-Key`. A rota POST /api/leads/register é pública (captura externa, com dedup por contato).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "adminKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "leadId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Root",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": ["{{baseUrl}}"],
+              "path": [""]
+            }
+          }
+        },
+        {
+          "name": "Health (API)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            }
+          }
+        },
+        {
+          "name": "Health (API + DB)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Leads",
+      "item": [
+        {
+          "name": "Register lead (público, com dedup)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nome\": \"João da Silva\",\n  \"contato\": \"+5511999998888\",\n  \"empresa\": \"Acme Ltda\",\n  \"contato_feito\": false,\n  \"elevenlabs_conversation_id\": null\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/register",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "register"]
+            },
+            "description": "Endpoint público de captura. Faz insert atômico com deduplicação por `contato` (UNIQUE). Resposta: { success, message, lead_id }."
+          }
+        },
+        {
+          "name": "Create lead (admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const lead = pm.response.json();",
+                  "  if (lead.id) pm.collectionVariables.set('leadId', lead.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nome\": \"Maria Souza\",\n  \"contato\": \"+5511988887777\",\n  \"empresa\": \"Beta S.A.\",\n  \"contato_feito\": false,\n  \"elevenlabs_conversation_id\": null\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/leads",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads"]
+            },
+            "description": "Cria um lead e retorna o registro completo (201). 409 se o contato já existir. O tester salva o `id` retornado em {{leadId}}."
+          }
+        },
+        {
+          "name": "List leads",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/list",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "list"]
+            },
+            "description": "Lista todos os leads ordenados por created_at desc. Resposta: { leads: [...] }."
+          }
+        },
+        {
+          "name": "Get lead by contato",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/by-contato?contato=5511988887777",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "by-contato"],
+              "query": [
+                { "key": "contato", "value": "5511988887777" }
+              ]
+            },
+            "description": "Busca um lead pelo campo `contato`. 404 se não existir."
+          }
+        },
+        {
+          "name": "Get lead by id",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/{{leadId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "{{leadId}}"]
+            },
+            "description": "Busca um lead pelo UUID. 400 se o id for inválido, 404 se não existir."
+          }
+        },
+        {
+          "name": "Replace lead (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nome\": \"Maria Souza\",\n  \"contato\": \"5511988887777\",\n  \"empresa\": \"Beta Holding S.A.\",\n  \"contato_feito\": true,\n  \"elevenlabs_conversation_id\": \"conv_abc123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/{{leadId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "{{leadId}}"]
+            },
+            "description": "Substituição completa do lead (todos os campos). 404 não existe, 409 contato duplicado."
+          }
+        },
+        {
+          "name": "Patch lead (parcial)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contato_feito\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/{{leadId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "{{leadId}}"]
+            },
+            "description": "Atualização parcial — envie apenas os campos a alterar. 400 se body vazio, 404 não existe, 409 contato duplicado."
+          }
+        },
+        {
+          "name": "Patch empresa",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"empresa\": \"Nova Empresa Ltda\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/{{leadId}}/empresa",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "{{leadId}}", "empresa"]
+            },
+            "description": "Rota específica para atualizar apenas a empresa. Resposta: { success, empresa }."
+          }
+        },
+        {
+          "name": "Patch contato-feito",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contato_feito\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/{{leadId}}/contato-feito",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "{{leadId}}", "contato-feito"]
+            },
+            "description": "Rota específica para marcar/desmarcar contato_feito. Resposta: { success, contato_feito }."
+          }
+        },
+        {
+          "name": "Delete lead",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Admin-Key", "value": "{{adminKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/leads/{{leadId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "leads", "{{leadId}}"]
+            },
+            "description": "Remove o lead pelo UUID. Resposta: { success, deleted_id }. 404 se não existir."
+          }
+        }
+      ]
+    }
+  ]
+}

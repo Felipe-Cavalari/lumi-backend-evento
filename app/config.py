@@ -1,7 +1,7 @@
 """Configurações da aplicação usando Pydantic Settings."""
 from pathlib import Path
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
 
 # .env na pasta backend (independente de onde o uvicorn é executado)
@@ -14,8 +14,7 @@ class Settings(BaseSettings):
     
     elevenlabs_api_key: str = Field(..., alias="ELEVENLABS_API_KEY")
     agent_id: Optional[str] = Field(None, alias="AGENT_ID")
-    supabase_url: Optional[str] = Field(None, alias="SUPABASE_URL")
-    supabase_key: Optional[str] = Field(None, alias="SUPABASE_KEY")
+    database_url: Optional[str] = Field(None, alias="DATABASE_URL")
     elevenlabs_agent_id: Optional[str] = Field(None, alias="ELEVENLABS_AGENT_ID")
     cors_origins: Optional[str] = Field(default="http://localhost:3000", alias="CORS_ORIGINS")
     admin_api_key: Optional[str] = Field(None, alias="ADMIN_API_KEY")
@@ -40,11 +39,12 @@ class Settings(BaseSettings):
             if origin.strip()
         ]
     
-    class Config:
-        env_file = _ENV_FILE
-        case_sensitive = False
-        populate_by_name = True
-        extra = "ignore"  # Ignorar campos extras no .env
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE,
+        case_sensitive=False,
+        populate_by_name=True,
+        extra="ignore",  # Ignorar campos extras no .env
+    )
 
 
 settings = Settings()

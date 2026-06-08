@@ -3,16 +3,17 @@ import logging
 from datetime import date
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.config import settings
+from app.security import require_admin_key
 from app.services.elevenlabs_usage_service import get_elevenlabs_usage
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
 logger = logging.getLogger(__name__)
 
 
-@router.get("/elevenlabs")
+@router.get("/elevenlabs", dependencies=[Depends(require_admin_key)])
 async def elevenlabs_usage(
     start_date: date = Query(default=None, description="Data de início (YYYY-MM-DD)"),
     end_date: date = Query(default=None, description="Data de fim (YYYY-MM-DD)"),

@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: lumi-postgres
+    restart: unless-stopped
+    environment:
+      # Usuário de aplicação dedicado (não usar o superuser default).
+      # Os valores vêm do .env; os defaults abaixo servem só para dev local.
+      POSTGRES_USER: ${POSTGRES_USER:-lumi_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumi_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-lumi}
+    ports:
+      # 5432 do host já está em uso → expõe na 5433.
+      # DATABASE_URL=postgresql://lumi_app:<senha>@localhost:5433/lumi
+      - "5433:5432"
+    volumes:
+      - lumi_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lumi_app} -d ${POSTGRES_DB:-lumi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  lumi_pgdata:

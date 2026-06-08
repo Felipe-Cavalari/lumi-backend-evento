@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import List, Optional
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from app.rate_limit import limiter
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 
@@ -14,15 +16,16 @@ DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class BrowserLogEntry(BaseModel):
-    timestamp: Optional[str] = None
-    level: str
-    message: str
+    timestamp: Optional[str] = Field(None, max_length=64)
+    level: str = Field(..., max_length=20)
+    message: str = Field(..., max_length=10_000)
 
 
 class BrowserLogBatch(BaseModel):
-    session_id: str
-    lead_email: Optional[str] = None
-    entries: List[BrowserLogEntry] = Field(default_factory=list)
+    session_id: str = Field(..., max_length=200)
+    lead_email: Optional[str] = Field(None, max_length=320)
+    # Limita o número de entradas por requisição para conter abuso de disco.
+    entries: List[BrowserLogEntry] = Field(default_factory=list, max_length=500)
 
 
 def sanitize_filename(value: str) -> str:
@@ -32,7 +35,8 @@ def sanitize_filename(value: str) -> str:
 
 
 @router.post("/browser-logs")
-async def save_browser_logs(batch: BrowserLogBatch):
+@limiter.limit("30/minute")
+async def save_browser_logs(request: Request, batch: BrowserLogBatch):
     """Salva lotes de logs de console do navegador em arquivo."""
     if not batch.entries:
         return {"success": True, "written": 0}
