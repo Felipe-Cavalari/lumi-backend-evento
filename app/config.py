@@ -20,7 +20,26 @@ class Settings(BaseSettings):
     admin_api_key: Optional[str] = Field(None, alias="ADMIN_API_KEY")
     twilio_account_sid: Optional[str] = Field(None, alias="TWILIO_ACCOUNT_SID")
     twilio_auth_token: Optional[str] = Field(None, alias="TWILIO_AUTH_TOKEN")
-    
+
+    # SMTP — notificação por e-mail a cada novo lead registrado.
+    smtp_host: Optional[str] = Field(None, alias="SMTP_HOST")
+    smtp_port: int = Field(587, alias="SMTP_PORT")
+    smtp_user: Optional[str] = Field(None, alias="SMTP_USER")
+    smtp_password: Optional[str] = Field(None, alias="SMTP_PASSWORD")
+    smtp_from: Optional[str] = Field(None, alias="SMTP_FROM")
+    smtp_use_tls: bool = Field(True, alias="SMTP_USE_TLS")
+    lead_notification_email: Optional[str] = Field(None, alias="LEAD_NOTIFICATION_EMAIL")
+
+    @property
+    def smtp_from_value(self) -> str:
+        """Remetente do e-mail; cai para o usuário SMTP se SMTP_FROM não for definido."""
+        return self.smtp_from or self.smtp_user or ""
+
+    @property
+    def smtp_configured(self) -> bool:
+        """True quando há host SMTP e destinatário configurados para a notificação."""
+        return bool(self.smtp_host and self.lead_notification_email)
+
     @property
     def agent_id_value(self) -> str:
         """Retorna o agent_id, tentando primeiro AGENT_ID e depois ELEVENLABS_AGENT_ID."""

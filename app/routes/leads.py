@@ -11,6 +11,7 @@ from app.config import settings
 from app.database import get_pool
 from app.rate_limit import limiter
 from app.security import require_admin_key
+from app.services.email_service import send_lead_notification
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,16 @@ async def register_lead(request: Request, lead: LeadCreate):
             lead.elevenlabs_conversation_id,
         )
         inserted = row["inserted"]
+        # No fluxo normal o convid não chega aqui (entra depois via PATCH, quando a
+        # conversa inicia). Mas se uma integração já criar o lead com convid, notifica.
+        if inserted and lead.elevenlabs_conversation_id:
+            await send_lead_notification(
+                {
+                    "nome": lead.nome,
+                    "contato": lead.contato,
+                    "elevenlabs_conversation_id": lead.elevenlabs_conversation_id,
+                }
+            )
         return {
             "success": True,
             "message": (
@@ -325,11 +336,28 @@ async def patch_lead(lead_id: str, lead: LeadPatch):
         f"update leads set {', '.join(set_clauses)} "
         f"where id = ${len(values)} returning {_LEAD_COLUMNS}"
     )
+    # Início de conversa = momento em que o front anexa o elevenlabs_conversation_id
+    # ao lead via PATCH. Só notifica se o convid mudou (evita e-mail duplicado se o
+    # mesmo id for reenviado), comparando com o valor atual antes do update.
+    new_convid = changes.get("elevenlabs_conversation_id")
     try:
         pool = get_pool()
+        prev_convid = None
+        if new_convid:
+            prev_convid = await pool.fetchval(
+                "select elevenlabs_conversation_id from leads where id = $1", lead_uuid
+            )
         row = await pool.fetchrow(query, *values)
         if row is None:
             raise HTTPException(status_code=404, detail="Lead não encontrado.")
+        if new_convid and new_convid != prev_convid:
+            await send_lead_notification(
+                {
+                    "nome": row["nome"],
+                    "contato": row["contato"],
+                    "elevenlabs_conversation_id": row["elevenlabs_conversation_id"],
+                }
+            )
         return _serialize_lead(row)
     except asyncpg.UniqueViolationError:
         raise HTTPException(status_code=409, detail="Já existe um lead com este contato.")
