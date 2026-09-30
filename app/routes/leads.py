@@ -87,6 +87,9 @@ async def register_lead(request: Request, lead: LeadCreate):
                 else "Lead já registrado (contato já existe)"
             ),
             "lead_id": str(row["id"]),
+            # O front só concede escrita irrestrita sobre o lead a quem o criou;
+            # para contato já existente, a posse não é comprovada.
+            "created": bool(inserted),
         }
     except HTTPException:
         raise

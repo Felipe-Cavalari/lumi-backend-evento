@@ -15,8 +15,17 @@ payload, sanitização de email), mas existem **falhas críticas em endpoints p�
 | A-01 | 🟠 Alto | ✅ Resolvido |
 | A-02 | 🟠 Alto | ✅ Resolvido |
 | A-03 | 🟠 Alto | ✅ Resolvido |
-| M-01..M-04 | 🟡 Médio | ⬜ Pendente |
-| B-01..B-03 | 🟢 Baixo | ⬜ Pendente |
+| M-01..M-04 | 🟡 Médio | ✅ Resolvido (2026-09-30) |
+| B-01 | 🟢 Baixo | ⬜ Pendente (documentado: SSL desligado só na rede interna) |
+| B-02, B-03 | 🟢 Baixo | ✅ Resolvido (2026-09-30) |
+
+**2026-09-30:** M-01 (erros genéricos ao cliente, detalhe só no log), M-02
+(`hmac.compare_digest`), M-03 (sem log de signed URL/token), M-04 (CORS sem
+credenciais e com headers explícitos), B-02 (`b64decode(validate=True)`) e B-03
+(`datetime.now(timezone.utc)`). Além disso, `/api/transcripts/stt|tts` e
+`/api/debug/browser-logs` passaram a exigir `X-Admin-Key` (só o Next grava,
+após validar o token do lead), e o rate limit só aceita `X-Client-IP` vindo de
+proxy autenticado.
 
 ---
 

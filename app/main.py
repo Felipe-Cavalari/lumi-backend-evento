@@ -37,13 +37,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Configurar CORS — usa a lista CORS_ORIGINS do .env (padrão: http://localhost:3000)
 cors_origins = settings.cors_origins_list
 
+# M-04: a API não usa cookies (autenticação é por X-Admin-Key), então não há
+# motivo para liberar credenciais nem expor/aceitar qualquer header.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
-    expose_headers=["*"],
+    allow_headers=["Content-Type", "Authorization", "X-Admin-Key"],
 )
 
 # Registrar rotas

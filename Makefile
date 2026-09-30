@@ -14,7 +14,7 @@ help: ## Lista os comandos disponíveis
 install: ## Cria o virtualenv e instala as dependências
 	python3 -m venv $(VENV)
 	$(PIP) install --upgrade pip
-	$(PIP) install -r requirements.txt
+	$(PIP) install -r requirements-dev.txt
 
 run: dev ## Alias para 'dev'
 

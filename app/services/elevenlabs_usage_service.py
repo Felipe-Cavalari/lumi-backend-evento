@@ -1,9 +1,15 @@
-"""ElevenLabs usage service — histórico de gerações, totalmente independente."""
+"""ElevenLabs usage service — minutos de conversa do agente (Conversational AI).
+
+O custo do agente Lumi é cobrado por minuto de conversa, não por caractere de
+TTS. Por isso a fonte é a lista de conversas (`/v1/convai/conversations`),
+somando `call_duration_secs` por dia. O custo em USD é uma ESTIMATIVA
+(minutos × `ELEVENLABS_COST_PER_MINUTE_USD`), já que o preço depende do plano
+e o LLM é cobrado à parte.
+"""
 import asyncio
 import logging
-import random
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -14,61 +20,76 @@ logger = logging.getLogger(__name__)
 
 _ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
 _CACHE_TTL = 300  # 5 minutos
-_COST_PER_1K_CHARS = 0.30  # USD — ajustar conforme plano contratado
+_PAGE_SIZE = 100  # máximo aceito pela API
+_MAX_PAGES = 200  # trava de segurança contra paginação infinita
 
 
-# ---------------------------------------------------------------------------
-# Cálculo de custo
-# ---------------------------------------------------------------------------
+def _minutes(seconds: int) -> float:
+    return round(seconds / 60, 2)
 
-def _chars_to_cost(char_count: int) -> float:
-    return round((char_count / 1000) * _COST_PER_1K_CHARS, 4)
+
+def _day_bounds_unix(start_date: date, end_date: date) -> tuple[int, int]:
+    """Converte o período (datas UTC, inclusive) em timestamps unix."""
+    start = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
+    end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+    return int(start.timestamp()), int(end.timestamp()) - 1
 
 
 # ---------------------------------------------------------------------------
 # Agregação
 # ---------------------------------------------------------------------------
 
-def _aggregate_history(
-    items: list[dict],
+def _aggregate_conversations(
+    conversations: list[dict],
     start_date: date,
     end_date: date,
-) -> tuple[int, list[dict]]:
-    """Agrega itens de histórico por dia.
+    cost_per_minute: float,
+) -> dict:
+    """Agrega conversas por dia (UTC).
 
     Returns:
-        total_usage: total de caracteres no período
-        daily_usage: [{"date": str, "usage": int, "cost": float}]
+        {"total_conversations", "total_minutes", "cost",
+         "daily_usage": [{"date", "conversations", "minutes", "cost"}]}
     """
-    daily: dict[str, int] = defaultdict(int)
+    seconds_by_day: dict[str, int] = defaultdict(int)
+    count_by_day: dict[str, int] = defaultdict(int)
 
-    for item in items:
-        ts = item.get("date_unix", 0)
+    for conv in conversations:
+        ts = conv.get("start_time_unix_secs") or 0
         if not ts:
             continue
-        item_date = datetime.utcfromtimestamp(ts).date()
-        if not (start_date <= item_date <= end_date):
+        day = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+        if not (start_date <= day <= end_date):
             continue
-        chars = abs(int(item.get("character_count_change_from", 0) or 0))
-        daily[item_date.isoformat()] += chars
+        key = day.isoformat()
+        seconds_by_day[key] += int(conv.get("call_duration_secs") or 0)
+        count_by_day[key] += 1
 
-    total = sum(daily.values())
-    daily_usage = [
-        {"date": day, "usage": count, "cost": _chars_to_cost(count)}
-        for day, count in sorted(daily.items())
-    ]
-    return total, daily_usage
+    daily_usage = []
+    for day in sorted(count_by_day):
+        minutes = _minutes(seconds_by_day[day])
+        daily_usage.append({
+            "date": day,
+            "conversations": count_by_day[day],
+            "minutes": minutes,
+            "cost": round(minutes * cost_per_minute, 4),
+        })
+
+    total_minutes = _minutes(sum(seconds_by_day.values()))
+    return {
+        "total_conversations": sum(count_by_day.values()),
+        "total_minutes": total_minutes,
+        "cost": round(total_minutes * cost_per_minute, 4),
+        "daily_usage": daily_usage,
+    }
 
 
 # ---------------------------------------------------------------------------
-# Fetch real
+# Fetch
 # ---------------------------------------------------------------------------
 
 async def _fetch_subscription(api_key: str) -> Optional[int]:
-    """Retorna caracteres restantes no plano (character_limit - character_count).
-
-    Retorna None se a chamada falhar, para não bloquear o resto do payload.
-    """
+    """Retorna os créditos restantes no plano (character_limit - character_count)."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{_ELEVENLABS_BASE}/user/subscription",
@@ -82,79 +103,43 @@ async def _fetch_subscription(api_key: str) -> Optional[int]:
     return max(0, limit - used)
 
 
-async def _fetch_history(
+async def _fetch_conversations(
     api_key: str,
+    agent_id: Optional[str],
     start_date: date,
     end_date: date,
 ) -> list[dict]:
-    """Busca histórico de gerações da API ElevenLabs.
+    """Lista as conversas do agente no período, seguindo a paginação por cursor."""
+    start_unix, end_unix = _day_bounds_unix(start_date, end_date)
+    params: dict = {
+        "page_size": _PAGE_SIZE,
+        "call_start_after_unix": start_unix,
+        "call_start_before_unix": end_unix,
+    }
+    if agent_id:
+        params["agent_id"] = agent_id
 
-    Itens são retornados do mais recente ao mais antigo; interrompe ao
-    ultrapassar start_date para não baixar dados desnecessários.
-    """
-    start_ts = datetime.combine(start_date, datetime.min.time()).timestamp()
-    items: list[dict] = []
-    params: dict = {"page_size": 100}
-    last_id: str | None = None
-
+    conversations: list[dict] = []
     async with httpx.AsyncClient() as client:
-        while True:
-            if last_id:
-                params["start_after_history_item_id"] = last_id
-
+        for _ in range(_MAX_PAGES):
             resp = await client.get(
-                f"{_ELEVENLABS_BASE}/history",
+                f"{_ELEVENLABS_BASE}/convai/conversations",
                 headers={"xi-api-key": api_key},
                 params=params,
                 timeout=15.0,
             )
             resp.raise_for_status()
             body = resp.json()
-            page = body.get("history", [])
+            conversations.extend(body.get("conversations", []))
 
-            if not page:
+            cursor = body.get("next_cursor")
+            if not body.get("has_more") or not cursor:
                 break
+            params["cursor"] = cursor
+        else:
+            logger.warning("ElevenLabs: paginação interrompida após %d páginas", _MAX_PAGES)
 
-            stop = False
-            for item in page:
-                item_ts = item.get("date_unix", 0)
-                if item_ts < start_ts:
-                    stop = True
-                    break
-                items.append(item)
-
-            if stop or not body.get("has_more"):
-                break
-
-            last_id = page[-1].get("history_item_id")
-            if not last_id:
-                break
-
-    return items
-
-
-# ---------------------------------------------------------------------------
-# Mock estruturado (fallback quando API indisponível)
-# ---------------------------------------------------------------------------
-
-def _generate_mock(start_date: date, end_date: date) -> tuple[int, list[dict]]:
-    """Gera dados sintéticos para desenvolvimento/fallback."""
-    rng = random.Random(str(start_date))
-    days = (end_date - start_date).days + 1
-    daily: list[dict] = []
-    total = 0
-
-    for i in range(days):
-        day = start_date + timedelta(days=i)
-        usage = rng.randint(3000, 12000)
-        total += usage
-        daily.append({
-            "date": day.isoformat(),
-            "usage": usage,
-            "cost": _chars_to_cost(usage),
-        })
-
-    return total, daily
+    return conversations
 
 
 # ---------------------------------------------------------------------------
@@ -163,52 +148,44 @@ def _generate_mock(start_date: date, end_date: date) -> tuple[int, list[dict]]:
 
 async def get_elevenlabs_usage(
     api_key: str,
+    agent_id: Optional[str],
     start_date: date,
     end_date: date,
+    cost_per_minute: float,
 ) -> dict:
-    """Retorna payload completo de uso ElevenLabs para o dashboard."""
-    cache_key = f"elevenlabs:usage:{start_date}:{end_date}"
+    """Retorna payload completo de uso ElevenLabs para o dashboard.
+
+    Falha na lista de conversas propaga a exceção (a rota devolve erro); não
+    há mais fallback com dados simulados, que podiam ser confundidos com reais.
+    """
+    cache_key = f"elevenlabs:usage:{agent_id}:{start_date}:{end_date}:{cost_per_minute}"
     cached = cache_get(cache_key, ttl=_CACHE_TTL)
     if cached is not None:
         logger.info("elevenlabs usage: cache hit")
         return cached
 
-    is_mock = False
-
-    # Executa history e subscription em paralelo, com falhas independentes
-    history_result, subscription_result = await asyncio.gather(
-        _fetch_history(api_key, start_date, end_date),
+    conversations, subscription_result = await asyncio.gather(
+        _fetch_conversations(api_key, agent_id, start_date, end_date),
         _fetch_subscription(api_key),
         return_exceptions=True,
     )
 
-    if isinstance(subscription_result, Exception):
-        logger.warning("ElevenLabs subscription fetch falhou: %s", subscription_result)
-        total_left: Optional[int] = None
-    else:
-        total_left = subscription_result
+    if isinstance(conversations, BaseException):
+        raise conversations
 
-    if isinstance(history_result, Exception):
-        exc = history_result
-        if isinstance(exc, httpx.HTTPStatusError):
-            logger.warning("ElevenLabs API retornou %s — usando mock", exc.response.status_code)
-        else:
-            logger.warning("ElevenLabs history fetch falhou: %s — usando mock", exc)
-        total_usage, daily_usage = _generate_mock(start_date, end_date)
-        is_mock = True
+    if isinstance(subscription_result, BaseException):
+        logger.warning("ElevenLabs subscription fetch falhou: %s", subscription_result)
+        credits_left: Optional[int] = None
     else:
-        total_usage, daily_usage = _aggregate_history(history_result, start_date, end_date)
+        credits_left = subscription_result
 
     payload: dict = {
         "provider": "elevenlabs",
         "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
-        "total_usage": total_usage,
-        "total_left": total_left,
-        "cost": _chars_to_cost(total_usage),
-        "daily_usage": daily_usage,
+        "cost_per_minute": cost_per_minute,
+        "credits_left": credits_left,
+        **_aggregate_conversations(conversations, start_date, end_date, cost_per_minute),
     }
-    if is_mock:
-        payload["_mock"] = True
 
     cache_set(cache_key, payload, ttl=_CACHE_TTL)
     return payload

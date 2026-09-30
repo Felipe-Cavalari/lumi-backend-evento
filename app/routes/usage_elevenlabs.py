@@ -18,7 +18,7 @@ async def elevenlabs_usage(
     start_date: date = Query(default=None, description="Data de início (YYYY-MM-DD)"),
     end_date: date = Query(default=None, description="Data de fim (YYYY-MM-DD)"),
 ):
-    """Retorna custo total, uso de caracteres e uso diário da ElevenLabs."""
+    """Retorna minutos de conversa do agente, custo estimado e uso diário da ElevenLabs."""
     today = date.today()
     if end_date is None:
         end_date = today
@@ -40,8 +40,10 @@ async def elevenlabs_usage(
     try:
         return await get_elevenlabs_usage(
             api_key=settings.elevenlabs_api_key,
+            agent_id=settings.agent_id_value or None,
             start_date=start_date,
             end_date=end_date,
+            cost_per_minute=settings.elevenlabs_cost_per_minute_usd,
         )
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code

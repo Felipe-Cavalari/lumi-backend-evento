@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     admin_api_key: Optional[str] = Field(None, alias="ADMIN_API_KEY")
     twilio_account_sid: Optional[str] = Field(None, alias="TWILIO_ACCOUNT_SID")
     twilio_auth_token: Optional[str] = Field(None, alias="TWILIO_AUTH_TOKEN")
+    # Preço por minuto de conversa do agente, usado só para ESTIMAR o custo no
+    # dashboard. Confira o valor do seu plano na ElevenLabs.
+    elevenlabs_cost_per_minute_usd: float = Field(0.08, alias="ELEVENLABS_COST_PER_MINUTE_USD")
 
     # SMTP — notificação por e-mail a cada novo lead registrado.
     smtp_host: Optional[str] = Field(None, alias="SMTP_HOST")
@@ -49,8 +52,6 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> List[str]:
         """Retorna CORS_ORIGINS como lista."""
         cors_str = self.cors_origins or "http://localhost:3000"
-        if isinstance(cors_str, list):
-            return cors_str
         # Dividir por vírgula, limpar espaços e remover trailing slash (navegador envia sem /)
         return [
             origin.strip().rstrip("/")

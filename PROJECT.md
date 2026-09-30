@@ -1,6 +1,8 @@
 # PROJECT.md — lumi-evento-service
 
 > Análise técnica gerada automaticamente em 2026-04-02.
+>
+> ⚠️ **Documento histórico.** Vários itens já foram resolvidos depois disso: CORS (S-01), chave do cliente (S-02), autenticação de leads (S-04), `filepath` nas respostas (S-05/S-06), limite de payload (V-03/V-04), conversão de áudio fora do event loop (P-02) e migração para Postgres próprio com Alembic. O estado atual da segurança está em `docs/security_review_08_06_2026.md`.
 
 ---
 

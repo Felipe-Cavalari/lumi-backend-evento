@@ -1,20 +1,31 @@
 """Rotas para salvar transcrições STT e áudios TTS."""
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, field_validator
-from typing import ClassVar, Optional
-import os
+import asyncio
 import base64
 import io
+import logging
 import shutil
-import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, field_validator
 from pydub import AudioSegment
 
 from app.rate_limit import limiter
 from app.security import require_admin_key
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/transcripts", tags=["transcripts"])
+
+# Formatos já encapsulados (gravação do browser): salvos como vieram, sem ffmpeg.
+# mp4/m4a/aac vêm do MediaRecorder do Safari/iOS.
+PASSTHROUGH_FORMATS = {"webm", "ogg", "wav", "mp3", "m4a", "mp4", "aac"}
+
+# Áudio do agente chega em PCM 16-bit mono 16 kHz
+# (metadata ElevenLabs: agent_output_audio_format = "pcm_16000").
+PCM_SAMPLE_RATE = 16000
 
 
 def _validate_speaker(v: str) -> str:
@@ -28,6 +39,7 @@ def _validate_speaker(v: str) -> str:
 
 class TranscriptData(BaseModel):
     lead_email: str
+    lead_id: Optional[str] = None
     speaker: str  # "user" ou "agent"
     text: str
     timestamp: Optional[str] = None
@@ -83,209 +95,175 @@ def _ensure_within(base: Path, target: Path) -> Path:
     return target_r
 
 
+def _safe_lead_folder(lead_email: str) -> str:
+    """Converte o contato (e-mail ou telefone) em nome de diretório seguro."""
+    safe = lead_email.replace("@", "_at_").replace(".", "_")
+    return "".join(c for c in safe if c.isalnum() or c in ["_", "-"])
+
+
+def _safe_timestamp(timestamp: str) -> str:
+    safe = timestamp.replace(":", "-").replace(".", "-").replace("T", "_").replace("Z", "")
+    return "".join(c for c in safe if c.isalnum() or c in ["-", "_"])
+
+
+def _mask_contact(contact: str) -> str:
+    """Evita gravar o contato completo (dado pessoal) nos logs."""
+    return f"***{contact[-4:]}" if len(contact) > 4 else "***"
+
+
 def get_lead_dir(lead_email: str) -> Path:
     """Retorna o diretório do lead, criando se necessário."""
-    # Sanitizar email para nome de diretório
-    safe_email = lead_email.replace("@", "_at_").replace(".", "_")
-    # Remover caracteres inválidos
-    safe_email = "".join(c for c in safe_email if c.isalnum() or c in ["_", "-"])
-    lead_dir = TRANSCRIPTS_DIR / safe_email
+    lead_dir = TRANSCRIPTS_DIR / _safe_lead_folder(lead_email)
     lead_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[STT] Diretório do lead: {lead_dir}")  # Debug log
     return lead_dir
 
 
 def get_audio_dir(lead_email: str, speaker: str = "user") -> Path:
     """
     Retorna o diretório de áudio do lead, criando se necessário.
-    Organiza em subpastas: user_audio/ e agent_audio/
-    
-    Args:
-        lead_email: Email do lead
-        speaker: "user" ou "agent" para determinar a subpasta
+    Organiza em subpastas: data/audio/{contato}/user_audio/ e agent_audio/
     """
-    safe_email = lead_email.replace("@", "_at_").replace(".", "_")
-    # Remover caracteres inválidos
-    safe_email = "".join(c for c in safe_email if c.isalnum() or c in ["_", "-"])
-    
-    # Determinar subpasta baseado no speaker
-    if speaker == "agent":
-        subfolder = "agent_audio"
-    else:
-        subfolder = "user_audio"
-    
-    # Criar estrutura: data/audio/{email}/user_audio/ ou data/audio/{email}/agent_audio/
-    audio_dir = AUDIO_DIR / safe_email / subfolder
+    subfolder = "agent_audio" if speaker == "agent" else "user_audio"
+    audio_dir = AUDIO_DIR / _safe_lead_folder(lead_email) / subfolder
     audio_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[TTS] Diretório de áudio do lead ({speaker}): {audio_dir}")  # Debug log
     return audio_dir
 
 
-@router.post("/stt")
-@limiter.limit("300/minute")
-async def save_stt_transcript(request: Request, transcript: TranscriptData):
-    """
-    Salva uma transcrição STT em arquivo de texto.
-    
-    Referência: https://docs.python.org/3/library/pathlib.html
+def _write_text(filepath: Path, content: str) -> None:
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _write_bytes(filepath: Path, content: bytes) -> None:
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+
+def _encode_pcm(pcm_bytes: bytes) -> tuple[bytes, str]:
+    """Converte PCM cru em MP3 (fallback: WAV, depois o próprio PCM).
+
+    Operação CPU-bound que chama o ffmpeg como subprocesso: deve rodar fora do
+    event loop (``asyncio.to_thread``) para não travar as demais requisições.
     """
     try:
-        print(f"[STT] Recebendo transcrição: email={transcript.lead_email}, speaker={transcript.speaker}, text={transcript.text[:50]}...")
-        
+        segment = AudioSegment(
+            pcm_bytes,
+            frame_rate=PCM_SAMPLE_RATE,
+            channels=1,
+            sample_width=2,  # 16-bit
+        )
+    except Exception:
+        logger.exception("[TTS] PCM inválido; salvando bytes crus")
+        return pcm_bytes, "pcm"
+
+    try:
+        buffer = io.BytesIO()
+        segment.export(buffer, format="mp3", bitrate="128k")
+        return buffer.getvalue(), "mp3"
+    except Exception:
+        logger.exception("[TTS] Falha ao converter para MP3 (ffmpeg instalado?); tentando WAV")
+
+    try:
+        buffer = io.BytesIO()
+        segment.export(buffer, format="wav")
+        return buffer.getvalue(), "wav"
+    except Exception:
+        logger.exception("[TTS] Falha ao converter para WAV; salvando PCM cru")
+        return pcm_bytes, "pcm"
+
+
+# As rotas de gravação exigem X-Admin-Key: só o servidor Next pode chamá-las,
+# depois de validar o token do lead do visitante. Sem isso, qualquer anônimo
+# gravaria arquivos arbitrários em disco.
+
+
+@router.post("/stt", dependencies=[Depends(require_admin_key)])
+@limiter.limit("120/minute")
+async def save_stt_transcript(request: Request, transcript: TranscriptData):
+    """Salva uma transcrição (fala do usuário ou do agente) em arquivo de texto."""
+    try:
         lead_dir = get_lead_dir(transcript.lead_email)
         timestamp = transcript.timestamp or datetime.now().isoformat()
-        
-        # Nome do arquivo: timestamp_speaker.txt
-        # Sanitizar timestamp para nome de arquivo válido
-        safe_timestamp = timestamp.replace(":", "-").replace(".", "-").replace("T", "_").replace("Z", "")
-        # Remover caracteres inválidos restantes
-        safe_timestamp = "".join(c for c in safe_timestamp if c.isalnum() or c in ["-", "_"])
-        filename = f"{safe_timestamp}_{transcript.speaker}.txt"
+        filename = f"{_safe_timestamp(timestamp)}_{transcript.speaker}.txt"
         filepath = _ensure_within(TRANSCRIPTS_DIR, lead_dir / filename)
 
-        print(f"[STT] Salvando em: {filepath}")
-        
-        # Salvar transcrição
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(f"Timestamp: {timestamp}\n")
-            f.write(f"Speaker: {transcript.speaker}\n")
-            f.write(f"Text: {transcript.text}\n")
-        
-        print(f"[STT] Arquivo salvo com sucesso: {filepath}")
+        content = (
+            f"Timestamp: {timestamp}\n"
+            f"Speaker: {transcript.speaker}\n"
+            f"Text: {transcript.text}\n"
+        )
+        await asyncio.to_thread(_write_text, filepath, content)
 
-        return {
-            "success": True,
-            "message": "Transcrição salva com sucesso",
-            "filepath": str(filepath),
-        }
+        logger.info(
+            "[STT] Transcrição salva: contato=%s speaker=%s",
+            _mask_contact(transcript.lead_email),
+            transcript.speaker,
+        )
+        return {"success": True, "message": "Transcrição salva com sucesso"}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao salvar transcrição: {str(e)}"
-        )
+    except Exception:
+        logger.exception("[STT] Erro ao salvar transcrição")
+        raise HTTPException(status_code=500, detail="Erro ao salvar transcrição.")
 
 
-@router.post("/tts")
-@limiter.limit("300/minute")
+@router.post("/tts", dependencies=[Depends(require_admin_key)])
+@limiter.limit("120/minute")
 async def save_tts_audio(request: Request, audio: AudioData):
-    """
-    Salva um áudio TTS ou STT (usuário) em arquivo MP3.
-    
-    Referência: 
-    - https://docs.python.org/3/library/base64.html
-    - https://github.com/jiaaro/pydub
-    """
+    """Salva um segmento de áudio do agente (PCM → MP3) ou do usuário (passthrough)."""
     try:
-        print(f"[TTS] Recebendo áudio: email={audio.lead_email}, speaker={audio.speaker}, lead_id={audio.lead_id}")
-        
-        # Usar speaker para determinar a subpasta (user_audio ou agent_audio)
+        try:
+            audio_bytes = base64.b64decode(audio.audio_base64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Áudio base64 inválido.")
+
         audio_dir = get_audio_dir(audio.lead_email, speaker=audio.speaker)
         timestamp = audio.timestamp or datetime.now().isoformat()
-        
-        # Decodificar base64
-        try:
-            audio_bytes = base64.b64decode(audio.audio_base64)
-        except Exception as decode_error:
-            print(f"[TTS] Erro ao decodificar base64: {decode_error}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Erro ao decodificar áudio base64: {str(decode_error)}"
-            )
-        
-        # Preparar nome do arquivo base
-        safe_timestamp = timestamp.replace(":", "-").replace(".", "-").replace("T", "_").replace("Z", "")
-        safe_timestamp = "".join(c for c in safe_timestamp if c.isalnum() or c in ["-", "_"])
         event_id = audio.event_id or 0
-        
-        # Para formatos já encapsulados (ex.: gravação do browser), salvar bytes crus
-        passthrough_formats = {"webm", "ogg", "wav", "mp3", "m4a"}
-        incoming_format = (audio.audio_format or "").lower().strip()
-        if incoming_format in passthrough_formats:
-            filename = f"{safe_timestamp}_{audio.speaker}_{event_id}.{incoming_format}"
-            filepath = _ensure_within(AUDIO_DIR, audio_dir / filename)
-            with open(filepath, "wb") as f:
-                f.write(audio_bytes)
-            print(f"[TTS] Áudio {incoming_format.upper()} salvo (passthrough): {filepath}")
-            return {
-                "success": True,
-                "message": f"Áudio salvo com sucesso em formato {incoming_format.upper()}",
-                "filepath": str(filepath),
-                "format": incoming_format,
-                "lead_id": audio.lead_id,
-            }
 
-        # Converter PCM para MP3 (padrão para áudio do agente)
-        audio_format = "mp3"
-        audio_segment = None
-        try:
-            # Criar AudioSegment a partir de bytes PCM (16-bit, mono)
-            # O áudio vem em formato PCM 16-bit do Conversational AI (16kHz) ou do usuário (16kHz)
-            # Ambos usam 16kHz conforme metadata: agent_output_audio_format: "pcm_16000"
-            sample_rate = 16000
-            audio_segment = AudioSegment(
-                audio_bytes,
-                frame_rate=sample_rate,
-                channels=1,
-                sample_width=2  # 16-bit = 2 bytes
-            )
-            
-            # Converter para MP3 usando ffmpeg (requer ffmpeg instalado)
-            # Referência: https://github.com/jiaaro/pydub#getting-ffmpeg-set-up
-            mp3_buffer = io.BytesIO()
-            audio_segment.export(mp3_buffer, format="mp3", bitrate="128k")
-            mp3_bytes = mp3_buffer.getvalue()
-            
-            print(f"[TTS] Áudio convertido: PCM {len(audio_bytes)} bytes -> MP3 {len(mp3_bytes)} bytes")
-        except Exception as convert_error:
-            print(f"[TTS] Erro ao converter para MP3: {convert_error}")
-            print(f"[TTS] Verifique se ffmpeg está instalado: brew install ffmpeg (macOS) ou apt-get install ffmpeg (Linux)")
-            # Se a conversão falhar, tentar salvar como WAV (formato mais compatível)
-            try:
-                if audio_segment is not None:
-                    wav_buffer = io.BytesIO()
-                    audio_segment.export(wav_buffer, format="wav")
-                    mp3_bytes = wav_buffer.getvalue()
-                    audio_format = "wav"
-                    print(f"[TTS] Salvando como WAV devido ao erro de conversão MP3")
-                else:
-                    mp3_bytes = audio_bytes
-                    audio_format = "pcm"
-                    print(f"[TTS] Salvando como PCM original (AudioSegment indisponível)")
-            except Exception as wav_error:
-                # Se tudo falhar, salvar como PCM original
-                print(f"[TTS] Salvando como PCM original devido ao erro de conversão")
-                mp3_bytes = audio_bytes
-                audio_format = "pcm"
-        
-        # Nome do arquivo: timestamp_speaker_eventId.{format}
-        filename = f"{safe_timestamp}_{audio.speaker}_{event_id}.{audio_format}"
+        incoming_format = (audio.audio_format or "").lower().strip()
+        if incoming_format in PASSTHROUGH_FORMATS:
+            file_bytes, audio_format = audio_bytes, incoming_format
+        else:
+            file_bytes, audio_format = await asyncio.to_thread(_encode_pcm, audio_bytes)
+
+        filename = f"{_safe_timestamp(timestamp)}_{audio.speaker}_{event_id}.{audio_format}"
         filepath = _ensure_within(AUDIO_DIR, audio_dir / filename)
-        
-        print(f"[TTS] Salvando áudio {audio_format.upper()} em: {filepath}, tamanho: {len(mp3_bytes)} bytes")
-        
-        # Salvar áudio
-        with open(filepath, "wb") as f:
-            f.write(mp3_bytes)
-        
-        print(f"[TTS] Áudio {audio_format.upper()} salvo com sucesso: {filepath}")
-        
+        await asyncio.to_thread(_write_bytes, filepath, file_bytes)
+
+        logger.info(
+            "[TTS] Áudio salvo: contato=%s speaker=%s formato=%s bytes=%d",
+            _mask_contact(audio.lead_email),
+            audio.speaker,
+            audio_format,
+            len(file_bytes),
+        )
         return {
             "success": True,
             "message": f"Áudio salvo com sucesso em formato {audio_format.upper()}",
-            "filepath": str(filepath),
             "format": audio_format,
             "lead_id": audio.lead_id,
         }
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"[TTS] Erro ao salvar áudio: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao salvar áudio: {str(e)}"
-        )
+    except Exception:
+        logger.exception("[TTS] Erro ao salvar áudio")
+        raise HTTPException(status_code=500, detail="Erro ao salvar áudio.")
+
+
+def _delete_children(base: Path) -> tuple[int, int]:
+    """Remove todo o conteúdo de ``base``; retorna (arquivos, diretórios) removidos."""
+    deleted_files = 0
+    deleted_dirs = 0
+    for item in list(base.iterdir()):
+        if item.is_dir():
+            deleted_files += sum(1 for f in item.rglob("*") if f.is_file())
+            shutil.rmtree(item)
+            deleted_dirs += 1
+        else:
+            item.unlink()
+            deleted_files += 1
+    return deleted_files, deleted_dirs
 
 
 @router.delete("/audio/all", dependencies=[Depends(require_admin_key)])
@@ -294,9 +272,6 @@ async def delete_all_audios():
     Deleta todos os arquivos de áudio em data/audio/ recursivamente.
     Requer header X-Admin-Key válido.
     """
-    deleted_files = 0
-    deleted_dirs = 0
-
     if not AUDIO_DIR.exists():
         return {
             "success": True,
@@ -305,21 +280,12 @@ async def delete_all_audios():
             "deleted_dirs": 0,
         }
 
-    for item in list(AUDIO_DIR.iterdir()):
-        if item.is_dir():
-            file_count = sum(1 for _ in item.rglob("*") if _.is_file())
-            shutil.rmtree(item)
-            deleted_files += file_count
-            deleted_dirs += 1
-        else:
-            item.unlink()
-            deleted_files += 1
-
-    print(f"[AUDIO] Deletados {deleted_files} arquivo(s) em {deleted_dirs} diretório(s) de {AUDIO_DIR}")
+    deleted_files, deleted_dirs = await asyncio.to_thread(_delete_children, AUDIO_DIR)
+    logger.info("[AUDIO] Deletados %d arquivo(s) em %d diretório(s)", deleted_files, deleted_dirs)
 
     return {
         "success": True,
-        "message": f"Todos os áudios foram deletados com sucesso.",
+        "message": "Todos os áudios foram deletados com sucesso.",
         "deleted_files": deleted_files,
         "deleted_dirs": deleted_dirs,
     }
@@ -331,9 +297,6 @@ async def delete_all_transcripts():
     Deleta todos os arquivos de transcrição em data/transcripts/ recursivamente.
     Requer header X-Admin-Key válido.
     """
-    deleted_files = 0
-    deleted_dirs = 0
-
     if not TRANSCRIPTS_DIR.exists():
         return {
             "success": True,
@@ -342,17 +305,8 @@ async def delete_all_transcripts():
             "deleted_dirs": 0,
         }
 
-    for item in list(TRANSCRIPTS_DIR.iterdir()):
-        if item.is_dir():
-            file_count = sum(1 for _ in item.rglob("*") if _.is_file())
-            shutil.rmtree(item)
-            deleted_files += file_count
-            deleted_dirs += 1
-        else:
-            item.unlink()
-            deleted_files += 1
-
-    print(f"[TRANSCRIPTS] Deletados {deleted_files} arquivo(s) em {deleted_dirs} diretório(s) de {TRANSCRIPTS_DIR}")
+    deleted_files, deleted_dirs = await asyncio.to_thread(_delete_children, TRANSCRIPTS_DIR)
+    logger.info("[TRANSCRIPTS] Deletados %d arquivo(s) em %d diretório(s)", deleted_files, deleted_dirs)
 
     return {
         "success": True,

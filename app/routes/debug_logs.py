@@ -1,13 +1,17 @@
 """Rotas para capturar logs do console do navegador."""
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
+import logging
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.rate_limit import limiter
+from app.security import require_admin_key
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 
@@ -34,7 +38,8 @@ def sanitize_filename(value: str) -> str:
     return safe[:120] or "unknown_session"
 
 
-@router.post("/browser-logs")
+# Só o servidor Next (X-Admin-Key) grava logs; o browser nunca chama direto.
+@router.post("/browser-logs", dependencies=[Depends(require_admin_key)])
 @limiter.limit("30/minute")
 async def save_browser_logs(request: Request, batch: BrowserLogBatch):
     """Salva lotes de logs de console do navegador em arquivo."""
@@ -48,7 +53,7 @@ async def save_browser_logs(request: Request, batch: BrowserLogBatch):
 
         with open(log_file, "a", encoding="utf-8") as f:
             if first_write:
-                created_at = datetime.utcnow().isoformat()
+                created_at = datetime.now(timezone.utc).isoformat()
                 f.write(f"# Browser log session: {session_id}\n")
                 f.write(f"# Created at (UTC): {created_at}\n")
                 if batch.lead_email:
@@ -56,15 +61,12 @@ async def save_browser_logs(request: Request, batch: BrowserLogBatch):
                 f.write("\n")
 
             for entry in batch.entries:
-                ts = entry.timestamp or datetime.utcnow().isoformat()
+                ts = entry.timestamp or datetime.now(timezone.utc).isoformat()
                 level = (entry.level or "log").upper()
                 message = entry.message.replace("\n", "\\n")
                 f.write(f"[{ts}] [{level}] {message}\n")
 
-        return {
-            "success": True,
-            "written": len(batch.entries),
-            "filepath": str(log_file),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao salvar logs: {str(e)}")
+        return {"success": True, "written": len(batch.entries)}
+    except Exception:
+        logger.exception("Erro ao salvar logs do navegador")
+        raise HTTPException(status_code=500, detail="Erro ao salvar logs.")

@@ -14,12 +14,15 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+# Settings exige ELEVENLABS_API_KEY no import; os testes nunca chamam a API real.
+os.environ.setdefault("ELEVENLABS_API_KEY", "test-elevenlabs-key")
+
 import asyncpg
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from app import database
+from app import database  # noqa: E402
 from app.config import settings
 from app.main import app
 
@@ -42,7 +45,7 @@ def test_db_url() -> str:
     return _swap_db(base, TEST_DB_NAME)
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def _prepare_database(test_db_url):
     """Cria o banco de teste (se necessário) e aplica as migrations uma vez."""
     maintenance = _swap_db(settings.database_url, "postgres")
@@ -74,7 +77,7 @@ def _prepare_database(test_db_url):
 
 
 @pytest_asyncio.fixture
-async def client(test_db_url, monkeypatch):
+async def client(test_db_url, _prepare_database, monkeypatch):
     """Cliente HTTP async ligado ao app, com pool apontando para o banco de teste."""
     monkeypatch.setattr(settings, "admin_api_key", ADMIN_KEY)
     monkeypatch.setattr(settings, "database_url", test_db_url)
@@ -90,6 +93,15 @@ async def client(test_db_url, monkeypatch):
 
     await pool.close()
     database._pool = None
+
+
+@pytest_asyncio.fixture
+async def api_client(monkeypatch):
+    """Cliente HTTP sem banco — para rotas que não tocam o Postgres."""
+    monkeypatch.setattr(settings, "admin_api_key", ADMIN_KEY)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
 
 
 @pytest.fixture

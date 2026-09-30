@@ -35,6 +35,29 @@ def _enforce_global_token_quota() -> None:
         )
 
 
+def _raise_upstream_error(endpoint: str, error: httpx.HTTPStatusError) -> None:
+    """M-01: loga o erro da ElevenLabs e devolve ao cliente só uma mensagem genérica."""
+    logger.error(
+        "ElevenLabs /%s HTTP error status=%d body=%s",
+        endpoint,
+        error.response.status_code,
+        error.response.text[:500],
+    )
+    raise HTTPException(
+        status_code=502,
+        detail="Falha ao comunicar com a ElevenLabs. Tente novamente.",
+    )
+
+
+def _raise_connection_error(endpoint: str, error: httpx.RequestError) -> None:
+    """M-01: idem para falhas de rede (timeout, DNS, conexão recusada)."""
+    logger.error("ElevenLabs /%s request error: %s", endpoint, error)
+    raise HTTPException(
+        status_code=502,
+        detail="Não foi possível conectar à ElevenLabs. Tente novamente.",
+    )
+
+
 @router.post("/token/realtime-scribe")
 @limiter.limit("30/minute")
 async def get_realtime_scribe_token(request: Request):
@@ -64,12 +87,9 @@ async def get_realtime_scribe_token(request: Request):
             data = response.json()
             return {"token": data.get("token")}
     except httpx.HTTPStatusError as e:
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"Erro ao gerar token: {e.response.text}"
-        )
+        _raise_upstream_error("realtime-scribe", e)
     except httpx.RequestError as e:
-        raise HTTPException(status_code=500, detail=f"Erro de conexão: {str(e)}")
+        _raise_connection_error("realtime-scribe", e)
 
 
 @router.get("/conversation/signed-url")
@@ -100,28 +120,24 @@ async def get_signed_url(request: Request):
                 },
                 timeout=10.0,
             )
-            logger.info("ElevenLabs /signed-url status=%d body=%s", response.status_code, response.text[:500])
+            # M-03: não loga o corpo — ele contém a signed URL (credencial).
+            logger.info("ElevenLabs /signed-url status=%d", response.status_code)
             response.raise_for_status()
             data = response.json()
             signed_url = data.get("signed_url")
             if not signed_url:
-                logger.error("ElevenLabs retornou signed_url nulo. Resposta completa: %s", data)
+                logger.error("ElevenLabs retornou signed_url nulo (chaves: %s)", list(data))
                 raise HTTPException(
                     status_code=502,
-                    detail=f"ElevenLabs retornou signed_url nulo. Resposta: {data}"
+                    detail="ElevenLabs não retornou a signed URL.",
                 )
             return {"signed_url": signed_url}
     except HTTPException:
         raise
     except httpx.HTTPStatusError as e:
-        logger.error("ElevenLabs /signed-url HTTP error status=%d body=%s", e.response.status_code, e.response.text)
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"Erro ao obter signed URL: {e.response.text}"
-        )
+        _raise_upstream_error("signed-url", e)
     except httpx.RequestError as e:
-        logger.error("ElevenLabs /signed-url request error: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Erro de conexão: {str(e)}")
+        _raise_connection_error("signed-url", e)
 
 
 @router.get("/conversation/token")
@@ -150,25 +166,21 @@ async def get_conversation_token(request: Request):
                 },
                 timeout=10.0,
             )
-            logger.info("ElevenLabs /conversation/token status=%d body=%s", response.status_code, response.text[:500])
+            # M-03: não loga o corpo — ele contém o token de conversa (credencial).
+            logger.info("ElevenLabs /conversation/token status=%d", response.status_code)
             response.raise_for_status()
             data = response.json()
             token = data.get("conversation_token") or data.get("token")
             if not token:
-                logger.error("ElevenLabs retornou token nulo. Resposta completa: %s", data)
+                logger.error("ElevenLabs retornou token nulo (chaves: %s)", list(data))
                 raise HTTPException(
                     status_code=502,
-                    detail=f"ElevenLabs retornou token nulo. Resposta: {data}"
+                    detail="ElevenLabs não retornou o token de conversa.",
                 )
             return {"conversation_token": token}
     except HTTPException:
         raise
     except httpx.HTTPStatusError as e:
-        logger.error("ElevenLabs /conversation/token HTTP error status=%d body=%s", e.response.status_code, e.response.text)
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"Erro ao obter conversation token: {e.response.text}"
-        )
+        _raise_upstream_error("conversation/token", e)
     except httpx.RequestError as e:
-        logger.error("ElevenLabs /conversation/token request error: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Erro de conexão: {str(e)}")
+        _raise_connection_error("conversation/token", e)

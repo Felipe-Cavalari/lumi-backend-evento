@@ -56,6 +56,8 @@ async def test_register_dedup_por_contato(client):
     )
     assert first.json()["lead_id"] == second.json()["lead_id"]
     assert "já registrado" in second.json()["message"].lower()
+    assert first.json()["created"] is True
+    assert second.json()["created"] is False
 
 
 # --------------------------------------------------------------------------- #
