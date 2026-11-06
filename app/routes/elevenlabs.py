@@ -1,21 +1,27 @@
 """Rotas para integração com ElevenLabs API."""
 import time
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 import httpx
 import logging
 from app.config import settings
 from app.cache import cache_get, cache_set
 from app.rate_limit import limiter
+from app.security import require_admin_key
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["elevenlabs"])
 
+# Quem pede credencial é sempre o servidor Next (site e frontend do evento),
+# com `X-Admin-Key`: o navegador nunca chama estas rotas direto. Sem a chave,
+# qualquer um com a URL do backend gerava token e gastava créditos, pulando o
+# cadastro que o site exige antes da conversa.
+#
 # Fix C-02: teto de uso GLOBAL (somado ao rate limit por IP) para proteger a
-# quota/custo da conta ElevenLabs mesmo sob abuso distribuído de muitos IPs.
-# São endpoints públicos do widget anônimo — sem este teto, N clientes
-# legítimos/maliciosos drenariam a conta. Ajuste conforme a escala do evento.
+# quota/custo da conta ElevenLabs mesmo sob abuso distribuído de muitos IPs
+# (visitantes legítimos ou não, todos passando pelo Next). Ajuste conforme a
+# escala do evento.
 # Janela fixa em memória (single-process; para multi-instância migrar p/ Redis).
 _TOKEN_QUOTA_WINDOW = 3600  # 1 hora
 _TOKEN_QUOTA_MAX = 2000  # gerações de token/signed-url por hora no total
@@ -58,7 +64,7 @@ def _raise_connection_error(endpoint: str, error: httpx.RequestError) -> None:
     )
 
 
-@router.post("/token/realtime-scribe")
+@router.post("/token/realtime-scribe", dependencies=[Depends(require_admin_key)])
 @limiter.limit("30/minute")
 async def get_realtime_scribe_token(request: Request):
     """
@@ -67,7 +73,7 @@ async def get_realtime_scribe_token(request: Request):
     Referência: https://elevenlabs.io/docs/developers/guides/cookbooks/speech-to-text/streaming#create-a-token
     """
     # Fix C-02: usa SEMPRE a chave do servidor; o cliente não pode injetar
-    # credencial via header. Endpoint público protegido por rate limit + teto global.
+    # credencial via header. Exige a chave admin, além do rate limit e do teto global.
     _enforce_global_token_quota()
     api_key = settings.elevenlabs_api_key
 
@@ -92,7 +98,7 @@ async def get_realtime_scribe_token(request: Request):
         _raise_connection_error("realtime-scribe", e)
 
 
-@router.get("/conversation/signed-url")
+@router.get("/conversation/signed-url", dependencies=[Depends(require_admin_key)])
 @limiter.limit("30/minute")
 async def get_signed_url(request: Request):
     """
@@ -100,7 +106,7 @@ async def get_signed_url(request: Request):
 
     Referência: https://elevenlabs.io/docs/conversational-ai/libraries/web-sockets#using-a-signed-url
     """
-    # Fix C-02: chave do servidor sempre; protegido por rate limit + teto global.
+    # Fix C-02: chave do servidor sempre; exige a chave admin + rate limit + teto global.
     _enforce_global_token_quota()
     api_key = settings.elevenlabs_api_key
 
@@ -140,13 +146,13 @@ async def get_signed_url(request: Request):
         _raise_connection_error("signed-url", e)
 
 
-@router.get("/conversation/token")
+@router.get("/conversation/token", dependencies=[Depends(require_admin_key)])
 @limiter.limit("30/minute")
 async def get_conversation_token(request: Request):
     """
     Obtém um conversation token (WebRTC) para o SDK oficial da ElevenLabs.
     """
-    # Fix C-02: chave do servidor sempre; protegido por rate limit + teto global.
+    # Fix C-02: chave do servidor sempre; exige a chave admin + rate limit + teto global.
     _enforce_global_token_quota()
     api_key = settings.elevenlabs_api_key
 
